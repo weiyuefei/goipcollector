@@ -1,21 +1,21 @@
-goIPCollector is a simple tool that collects IP data from ip.taobao.com and generates
+goIPCollector
+============
+goIPCollector is a simple tool that collects IP data from ip.taobao.com and generates<br>
 records to insert into database.
 
 Quick start
-1) Install
-go get github.com/apsdehal/go-logger
-go get github.com/goless/config
-go get github.com/mattn/go-sqlite3
+--------------
+#Install
+* go get github.com/apsdehal/go-logger<br>
+* go get github.com/goless/config<br>
+* go get github.com/mattn/go-sqlite3<br>
+* go get github.com/weiyuefei/goipcollector<br>
 
-go get github.com/weiyuefei/goipcollector
-
-2) Run
-
-go build github.com/weiyuefei/goipcollector/goIPCollector.go
-
-cd github.com/weiyuefei/goipcollector
-
-./goIPCollector config.json
+#Run
+* go build github.com/weiyuefei/goipcollector/goIPCollector.go
+* cd github.com/weiyuefei/goipcollector
+* ./goIPCollector config.json
 
 TODO:
-1) Support concurrent query
+------------
+#Support concurrency
