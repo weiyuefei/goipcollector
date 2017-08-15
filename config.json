@@ -1,0 +1,6 @@
+{
+    "ipFile": "CNIPRange.txt",
+    "dbFile": "CNIPWarehouse.db",
+    "logFile":"goIPCollector.log",
+    "urlBase": "http://ip.taobao.com/service/getIpInfo.php?ip="
+}
