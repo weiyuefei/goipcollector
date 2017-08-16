@@ -16,18 +16,19 @@ Quick start
 --------------
 ### Installation
 ```Bash
-* # go get github.com/apsdehal/go-logger<br>
-* # go get github.com/goless/config<br>
-* # go get github.com/mattn/go-sqlite3<br>
-* # go get github.com/weiyuefei/goipcollector<br>
+$ go get github.com/apsdehal/go-logger
+$ go get github.com/goless/config
+$ go get github.com/mattn/go-sqlite3
+$ go get github.com/weiyuefei/goipcollector
 ```
 
 ### Run
 ```Bash
-* # go build github.com/weiyuefei/goipcollector/goIPCollector.go
-* # cd github.com/weiyuefei/goipcollector
-* # ./goIPCollector config.json
+$ go build github.com/weiyuefei/goipcollector/goIPCollector.go
+$ cd github.com/weiyuefei/goipcollector
+$ ./goIPCollector config.json
 ```
 
-TODO list
+TODO List
+-----------------------
 * support resuming query when reboot
