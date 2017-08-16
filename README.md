@@ -5,17 +5,17 @@ records to insert into database.
 
 Quick start
 --------------
-# Install
+ Installation
 * go get github.com/apsdehal/go-logger<br>
 * go get github.com/goless/config<br>
 * go get github.com/mattn/go-sqlite3<br>
 * go get github.com/weiyuefei/goipcollector<br>
 
-# Run
+ Run
 * go build github.com/weiyuefei/goipcollector/goIPCollector.go
 * cd github.com/weiyuefei/goipcollector
 * ./goIPCollector config.json
 
 TODO:
 ------------
-# Support concurrency
+* Support concurrency
