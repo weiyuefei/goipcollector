@@ -60,7 +60,7 @@ func main() {
 
 	wg.Add(2)
 	go ReadIpSection(config.Get("ipFile").(string), dataChan, &wg, log)
-	go ConsumeIpSection(config.Get("dbFile").(string), config.Get("urlBase").(string), dataChan, &wg, log)
+	go ConsumeIpSection(config.Get("dbFile").(string), config.Get("urlBase").(string), int(config.Get("batchNum").(float64)), dataChan, &wg, log)
 
 	fmt.Println("IP collector starts")
 	wg.Wait()
@@ -105,7 +105,9 @@ func ReadIpSection(ipFile string, dataChan chan string, wg *sync.WaitGroup, log 
 	}
 }
 
-func ConsumeIpSection(dbFile, urlBase string, dataChan chan string, wg *sync.WaitGroup, log *logger.Logger) {
+func ConsumeIpSection(dbFile, urlBase string, batchNum int, dataChan chan string, wg *sync.WaitGroup, log *logger.Logger) {
+
+	defer wg.Done()
 
 	for {
 		record, ok := <-dataChan
@@ -116,14 +118,12 @@ func ConsumeIpSection(dbFile, urlBase string, dataChan chan string, wg *sync.Wai
 
 		startTime := time.Now().Second()
 
-		DoConsume(record, dbFile, urlBase, log)
+		DoConsume(record, dbFile, urlBase, batchNum, log)
 
 		endTime := time.Now().Second()
 
 		log.InfoF("Consuming time %d seconds", endTime-startTime)
 	}
-
-	defer wg.Done()
 }
 
 func SplitRecord(record string) ([]string, error) {
@@ -155,7 +155,7 @@ func SplitRecord(record string) ([]string, error) {
 	return res, nil
 }
 
-func DoConsume(dataRecord, dbFile, urlBase string, log *logger.Logger) {
+func DoConsume(dataRecord, dbFile, urlBase string, batchNum int, log *logger.Logger) {
 	items, err := SplitRecord(dataRecord)
 	if err != nil {
 		log.ErrorF("SplitRecord: %s", err)
@@ -191,58 +191,76 @@ func DoConsume(dataRecord, dbFile, urlBase string, log *logger.Logger) {
 	}
 	defer db.Close()
 
-L1:
-	for i := 0; i < ipCount; i++ {
+	for i := 0; i < ipCount; i += batchNum {
 
-		var code int
-		var data string
-
-		maxTryTimes := 5
-
-		for try := 0; try < maxTryTimes; try++ {
-			code, data = DoQuery(urlBase, i+startIPNet, log)
-			if code == 104 {
-				log.ErrorF("Connection was reset by peer (%d) times, IP=%s",
-					try+1, IPStr(i+startIPNet))
-				time.Sleep(time.Duration(math.Pow(2, float64(try))) * time.Second)
-				continue
-			}
-
-			if code != 200 && code != 206 {
-				log.ErrorF("StatusCode=%d", code)
-				continue L1
-			}
-
-			break
+		var wg sync.WaitGroup
+		
+		for j := 0; j < batchNum && (i+j) < ipCount; j++ {
+			wg.Add(1)
+			go QueryAndSave(urlBase, i+j+startIPNet, &wg, db, log)
 		}
 
-		log.InfoF("####%s####", data)
-		dat := ParseJson(data)
-		if dat == nil {
-			log.ErrorF("ParseJson error, skip")
-			continue L1
-		}
-		stmt, err := db.Prepare("INSERT INTO ip_warehouse(country,country_id,area,area_id,provice,provice_id,city,city_id,isp,isp_id,ip) values(?,?,?,?,?,?,?,?,?,?,?)")
-		if err != nil {
-			log.ErrorF("Prepare@@@@@@%s@@@@@@", data)
-			continue L1
-		}
-
-		area_id, _ := strconv.Atoi(dat["area_id"])
-		provice_id, _ := strconv.Atoi(dat["region_id"])
-		city_id, _ := strconv.Atoi(dat["city_id"])
-		isp_id, _ := strconv.Atoi(dat["isp_id"])
-
-		_, err = stmt.Exec(dat["country"], dat["country_id"], dat["area"], area_id,
-			dat["region"], provice_id, dat["city"], city_id,
-			dat["isp"], isp_id, dat["ip"])
-		if err != nil {
-			log.ErrorF("@@@@@@Exec Error@@@@@@")
-			continue L1
-		}
+		wg.Wait()
 	}
 }
 
+func QueryAndSave(urlBase string, ipnr int, wg *sync.WaitGroup, db *sql.DB, log *logger.Logger) {
+
+	defer wg.Done()
+
+	var code int
+	var data string
+
+	maxTryTimes := 5
+
+	for try := 0; try < maxTryTimes; try++ {
+
+		code, data = DoQuery(urlBase, ipnr, log)
+		if code == 104 {
+			log.ErrorF("Connection was reset by peer (%d) times, IP=%s",
+				try+1, IPStr(ipnr))
+			time.Sleep(time.Duration(math.Pow(2, float64(try))) * time.Second)
+			continue
+		}
+
+		if code != 200 && code != 206 {
+			log.ErrorF("StatusCode=%d, IP=%s", code, IPStr(ipnr))
+			return
+		}
+
+		break
+	}
+
+	if code == 104 {
+		log.ErrorF("Connection was always reset by peer, IP=%s", IPStr(ipnr))
+		return
+	}
+
+	log.InfoF("####%s####", data)
+	dat := ParseJson(data)
+	if dat == nil {
+		log.ErrorF("ParseJson error, skip, IP=%s", IPStr(ipnr))
+		return
+	}
+
+	stmt, err := db.Prepare("INSERT INTO ip_warehouse(country,country_id,area,area_id,provice,provice_id,city,city_id,isp,isp_id,ip) values(?,?,?,?,?,?,?,?,?,?,?)")
+	if err != nil {
+		log.ErrorF("Prepare@@@@@@%s@@@@@@", data)
+		return
+	}
+
+	area_id, _ := strconv.Atoi(dat["area_id"])
+	provice_id, _ := strconv.Atoi(dat["region_id"])
+	city_id, _ := strconv.Atoi(dat["city_id"])
+	isp_id, _ := strconv.Atoi(dat["isp_id"])
+
+	_, err = stmt.Exec(dat["country"], dat["country_id"], dat["area"], area_id,
+		dat["region"], provice_id, dat["city"], city_id,
+		dat["isp"], isp_id, dat["ip"])
+	if err != nil {
+		log.ErrorF("@@@@@@Exec Error@@@@@@")
+	}
+}
 func ParseJson(data string) map[string]string {
 	var dat map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &dat); err != nil {
