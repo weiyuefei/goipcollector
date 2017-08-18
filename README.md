@@ -32,3 +32,5 @@ $ ./goIPCollector config.json
 TODO List
 -----------------------
 * support resuming query when reboot
+* support daemon mode
+* support signal handler
