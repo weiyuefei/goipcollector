@@ -300,6 +300,10 @@ func DoQuery(urlBase string, ipNet int, log *logger.Logger) (int, string) {
 
 	req.Header.Add("User-Agent", "Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.0; Trident/4.0)")
 	resp, err := client.Do(req)
+	if err != nil {
+	    return 2, err.String()
+	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
