@@ -29,8 +29,6 @@ $ cd github.com/weiyuefei/goipcollector
 $ ./goIPCollector config.json
 ```
 
-TODO List
+TODO
 -----------------------
 * support resuming query when reboot
-* 	support daemon mode
-* 	support signal handler
