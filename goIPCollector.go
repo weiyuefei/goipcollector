@@ -9,41 +9,69 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/apsdehal/go-logger"
 	"github.com/goless/config"
 	_ "github.com/mattn/go-sqlite3"
 	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 func main() {
 
-	if len(os.Args) != 2 {
-		log.Printf("Usage: %s config", os.Args[0])
+	rootPathPtr := flag.String("p", "./", "The prefix path")
+	configFilePtr := flag.String("c", "conf/config.json", "The config file")
+	signalNamePtr := flag.String("s", "", "The reload|stop signal")
+
+	flag.Parse()
+
+	configAbsPath := *rootPathPtr + *configFilePtr
+	config := config.New(configAbsPath)
+
+	if *signalNamePtr != "" {
+		pid, err := GetPid(config.Get("pid").(string))
+		if err != nil {
+			fmt.Printf("Error:%s\n", err.Error())
+			return
+		}
+
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Printf("Error:%s\n", err.Error())
+			return
+		}
+
+		var sig os.Signal
+		switch *signalNamePtr {
+		case "reload":
+			sig = syscall.SIGUSR2
+		case "stop":
+			sig = os.Interrupt
+		}
+
+		proc.Signal(sig)
 		return
 	}
 
-	config := config.New(os.Args[1])
-
-	//logFile := config.Get("logFile")
-	file, err := os.Create(config.Get("logFile").(string))
+	logFile, err := os.OpenFile(config.Get("logFile").(string), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0)
 	if err != nil {
 		fmt.Errorf("Can't open log file, %s", err)
 		return
 	}
-	defer file.Close()
+	defer logFile.Close()
 
-	log, err := logger.New("goipcollector", 0, file)
+	log, err := logger.New("goipcollector", 0, logFile)
 	if err != nil {
 		fmt.Errorf("Can't new log file, %s", err)
 		return
@@ -55,15 +83,80 @@ func main() {
 		return
 	}
 
-	dataChan := make(chan string)
+	pidFile, err := os.OpenFile(config.Get("pid").(string), os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		log.ErrorF("Open pidfile error: %v", err)
+		return
+	}
+
+	info, _ := pidFile.Stat()
+	if info.Size() != 0 {
+		log.InfoF("%s is already running", os.Args[0])
+		return
+	}
+
+	if config.Get("daemon").(string) == "on" && os.Getppid() != 1 {
+		Daemon()
+	}
+
+	pidFile.WriteString(fmt.Sprint(os.Getpid()))
+	go Worker(&config, log)
+	Master(pidFile, log)
+}
+
+func GetPid(pidfile string) (int, error) {
+	data, err := ioutil.ReadFile(pidfile)
+	if err != nil {
+		return 0, err
+	}
+
+	pid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return 0, err
+	}
+
+	return pid, nil
+}
+
+func Master(pidFile *os.File, log *logger.Logger) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGUSR2)
+	for {
+		s := <-c
+		switch s {
+		case syscall.SIGUSR2:
+			log.InfoF("receive SIGUSR2 to reload")
+		case os.Interrupt:
+			log.InfoF("receive SIGINT to stop")
+			pidFile.Close()
+			os.Remove(pidFile.Name())
+			fmt.Println("bye")
+			os.Exit(0)
+		}
+	}
+}
+
+func Worker(config *config.Config, log *logger.Logger) {
+	batchNum := config.Get("batchNum").(float64)
+	dataChan := make(chan string, int(batchNum))
+
 	var wg sync.WaitGroup
-
-	wg.Add(2)
+	wg.Add(1)
 	go ReadIpSection(config.Get("ipFile").(string), dataChan, &wg, log)
-	go ConsumeIpSection(config.Get("dbFile").(string), config.Get("urlBase").(string), int(config.Get("batchNum").(float64)), dataChan, &wg, log)
 
-	fmt.Println("IP collector starts")
+	for i := 0; i < int(batchNum); i++ {
+		wg.Add(1)
+		go ConsumeIpSection(config.Get("dbFile").(string), config.Get("urlBase").(string), dataChan, &wg, log)
+	}
+
+	log.InfoF("Application starts success")
 	wg.Wait()
+}
+
+func Daemon() {
+	args := append([]string{os.Args[0]}, os.Args[1:]...)
+	os.StartProcess(os.Args[0], args, &os.ProcAttr{Files: []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+	os.Exit(0)
 }
 
 // Create the database file and table
@@ -74,7 +167,7 @@ func InitDatabase(dbFile string, log *logger.Logger) (bool, error) {
 	}
 	defer db.Close()
 
-	sql := `CREATE TABLE IF NOT EXISTS ip_warehouse(country TEXT, country_id TEXT, area, area_id INTEGER, provice TEXT, provice_id INTEGER, city TEXT, city_id INTEGER, isp TEXT, isp_id INTEGER, ip TEXT);`
+	sql := `CREATE TABLE IF NOT EXISTS ip_warehouse(country TEXT, country_id TEXT, area, area_id INTEGER, region TEXT, region_id INTEGER, city TEXT, city_id INTEGER, isp TEXT, isp_id INTEGER, start_ip INTEGER,end_ip INTEGER,start_ipa TEXT, end_ipa TEXT);`
 	db.Exec(sql)
 
 	return true, nil
@@ -105,24 +198,23 @@ func ReadIpSection(ipFile string, dataChan chan string, wg *sync.WaitGroup, log 
 	}
 }
 
-func ConsumeIpSection(dbFile, urlBase string, batchNum int, dataChan chan string, wg *sync.WaitGroup, log *logger.Logger) {
+func ConsumeIpSection(dbFile, urlBase string, dataChan chan string, wg *sync.WaitGroup, log *logger.Logger) {
 
 	defer wg.Done()
 
 	for {
+		t1 := time.Now()
+
 		record, ok := <-dataChan
 		if !ok {
 			break
 		}
+
 		log.InfoF("Consuming record[%s]", record)
+		DoConsume(record, dbFile, urlBase, log)
 
-		startTime := time.Now().Second()
-
-		DoConsume(record, dbFile, urlBase, batchNum, log)
-
-		endTime := time.Now().Second()
-
-		log.InfoF("Consuming time %d seconds", endTime-startTime)
+		t2 := time.Now()
+		log.InfoF("Consuming time: %v, record[%s]", t2.Sub(t1), record)
 	}
 }
 
@@ -155,33 +247,36 @@ func SplitRecord(record string) ([]string, error) {
 	return res, nil
 }
 
-func DoConsume(dataRecord, dbFile, urlBase string, batchNum int, log *logger.Logger) {
+type QueryRecord struct {
+	country   string
+	countryId string
+	area      string
+	areaId    int
+	region    string
+	regionId  int
+	city      string
+	cityId    int
+	isp       string
+	ispId     int
+}
+
+func DoConsume(dataRecord, dbFile, urlBase string, log *logger.Logger) {
 	items, err := SplitRecord(dataRecord)
 	if err != nil {
 		log.ErrorF("SplitRecord: %s", err)
 		return
 	}
 
-	ipCount, err := strconv.Atoi(items[3])
+	startIPNet, err := IPNum(items[0])
 	if err != nil {
-		log.ErrorF("Atoi: %s", errors.New("Invalid IP count number"))
+		log.ErrorF("Start IPNum: %s", err)
 		return
 	}
 
-	startIPNums := strings.Split(items[0], ".")
-	E := errors.New("Not A IP.")
-	if len(startIPNums) != 4 {
-		log.ErrorF("Split: %s", E)
+	endIPNet, err := IPNum(items[1])
+	if err != nil {
+		log.ErrorF("End IPNum: %s", err)
 		return
-	}
-	var startIPNet int
-	for k, v := range startIPNums {
-		num, err := strconv.Atoi(v)
-		if err != nil || num > 255 {
-			log.ErrorF("Atoi: %s", E)
-			return
-		}
-		startIPNet = startIPNet | num<<uint(8*(3-k))
 	}
 
 	db, err := sql.Open("sqlite3", dbFile)
@@ -191,22 +286,104 @@ func DoConsume(dataRecord, dbFile, urlBase string, batchNum int, log *logger.Log
 	}
 	defer db.Close()
 
-	for i := 0; i < ipCount; i += batchNum {
+	rangeStartIP := startIPNet
+	cacheR := make(map[int]*QueryRecord)
 
-		var wg sync.WaitGroup
-		
-		for j := 0; j < batchNum && (i+j) < ipCount; j++ {
-			wg.Add(1)
-			go QueryAndSave(urlBase, i+j+startIPNet, &wg, db, log)
+	var (
+		targetRecord *QueryRecord
+		ok           bool
+		rc           int
+	)
+
+	for rangeStartIP <= endIPNet {
+
+		targetRecord, ok = cacheR[rangeStartIP]
+		if !ok {
+			rc, targetRecord = TryQuery(urlBase, rangeStartIP, log)
+			if targetRecord == nil {
+				if rc != 104 {
+					rangeStartIP += 1
+				}
+				continue
+			}
 		}
 
-		wg.Wait()
+		low := rangeStartIP
+		high := endIPNet
+		mid := low + (high-low)/2
+
+		// binaray search
+		for low <= high {
+			midRecord, ok := cacheR[mid]
+			if !ok {
+				_, midRecord = TryQuery(urlBase, mid, log)
+				if midRecord == nil {
+					break
+				}
+			}
+
+			if RecordIsEqual(targetRecord, midRecord) {
+				low = mid + 1
+			} else {
+				high = mid - 1
+				cacheR[mid] = midRecord
+			}
+
+			mid = low + (high-low)/2
+		}
+
+		// range record [rangeStartIP, mid]
+		SaveToDB(db, targetRecord, rangeStartIP, mid-1, log)
+
+		// update cache
+		for key, _ := range cacheR {
+			if key < mid {
+				delete(cacheR, key)
+			}
+		}
+
+		rangeStartIP = mid
 	}
 }
 
-func QueryAndSave(urlBase string, ipnr int, wg *sync.WaitGroup, db *sql.DB, log *logger.Logger) {
+func RecordIsEqual(r1, r2 *QueryRecord) bool {
 
-	defer wg.Done()
+	if r1.countryId != r2.countryId {
+		return false
+	}
+
+	if r1.countryId == "HK" || r1.countryId == "TW" ||
+		r1.countryId == "MO" {
+		return true
+	}
+
+	if r1.regionId != r2.regionId ||
+		r1.areaId != r2.areaId ||
+		r1.cityId != r2.cityId ||
+		r1.ispId != r2.ispId {
+		return false
+	}
+
+	return true
+}
+
+func SaveToDB(db *sql.DB, rec *QueryRecord, startIP, endIP int, log *logger.Logger) {
+
+	stmt, err := db.Prepare("INSERT INTO ip_warehouse(country,country_id,area,area_id,region,region_id,city,city_id,isp,isp_id,start_ip, end_ip, start_ipa, end_ipa) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+	if err != nil {
+		log.ErrorF("###### SaveToDB Prepare error")
+		return
+	}
+
+	_, err = stmt.Exec(rec.country, rec.countryId, rec.area, rec.areaId,
+		rec.region, rec.regionId, rec.city, rec.cityId,
+		rec.isp, rec.ispId, startIP, endIP, IPStr(startIP), IPStr(endIP))
+	if err != nil {
+		log.ErrorF("###### SaveToDB Exec error")
+	}
+}
+
+func TryQuery(urlBase string, ipnr int, log *logger.Logger) (int, *QueryRecord) {
 
 	var code int
 	var data string
@@ -225,7 +402,7 @@ func QueryAndSave(urlBase string, ipnr int, wg *sync.WaitGroup, db *sql.DB, log 
 
 		if code != 200 && code != 206 {
 			log.ErrorF("StatusCode=%d, IP=%s", code, IPStr(ipnr))
-			return
+			return code, nil
 		}
 
 		break
@@ -233,34 +410,27 @@ func QueryAndSave(urlBase string, ipnr int, wg *sync.WaitGroup, db *sql.DB, log 
 
 	if code == 104 {
 		log.ErrorF("Connection was always reset by peer, IP=%s", IPStr(ipnr))
-		return
+		return code, nil
 	}
 
 	log.InfoF("####%s####", data)
 	dat := ParseJson(data)
 	if dat == nil {
 		log.ErrorF("ParseJson error, skip, IP=%s", IPStr(ipnr))
-		return
+		return 1, nil
 	}
 
-	stmt, err := db.Prepare("INSERT INTO ip_warehouse(country,country_id,area,area_id,provice,provice_id,city,city_id,isp,isp_id,ip) values(?,?,?,?,?,?,?,?,?,?,?)")
-	if err != nil {
-		log.ErrorF("Prepare@@@@@@%s@@@@@@", data)
-		return
-	}
+	rec := &QueryRecord{country: dat["country"], countryId: dat["country_id"],
+		area: dat["area"], region: dat["region"], city: dat["city"], isp: dat["isp"]}
 
-	area_id, _ := strconv.Atoi(dat["area_id"])
-	provice_id, _ := strconv.Atoi(dat["region_id"])
-	city_id, _ := strconv.Atoi(dat["city_id"])
-	isp_id, _ := strconv.Atoi(dat["isp_id"])
+	rec.areaId, _ = strconv.Atoi(dat["area_id"])
+	rec.regionId, _ = strconv.Atoi(dat["region_id"])
+	rec.cityId, _ = strconv.Atoi(dat["city_id"])
+	rec.ispId, _ = strconv.Atoi(dat["isp_id"])
 
-	_, err = stmt.Exec(dat["country"], dat["country_id"], dat["area"], area_id,
-		dat["region"], provice_id, dat["city"], city_id,
-		dat["isp"], isp_id, dat["ip"])
-	if err != nil {
-		log.ErrorF("@@@@@@Exec Error@@@@@@")
-	}
+	return code, rec
 }
+
 func ParseJson(data string) map[string]string {
 	var dat map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &dat); err != nil {
@@ -300,6 +470,11 @@ func DoQuery(urlBase string, ipNet int, log *logger.Logger) (int, string) {
 
 	req.Header.Add("User-Agent", "Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 6.0; Trident/4.0)")
 	resp, err := client.Do(req)
+	if err != nil {
+		log.ErrorF("Response returns nil: %s", err)
+		return 2, err.Error()
+	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
@@ -331,3 +506,25 @@ func IPStr(ipnr int) string {
 
 	return net.IPv4(bytes[3], bytes[2], bytes[1], bytes[0]).String()
 }
+
+func IPNum(ipaddr string) (int, error) {
+
+	IPNums := strings.Split(ipaddr, ".")
+	err := errors.New("Not A IPv4 format.")
+	if len(IPNums) != 4 {
+		return 0, err
+	}
+
+	var ipnr int
+	for k, v := range IPNums {
+		num, err := strconv.Atoi(v)
+		if err != nil || num > 255 {
+			return 0, err
+		}
+
+		ipnr = ipnr | num<<uint(8*(3-k))
+	}
+
+	return ipnr, nil
+}
+
