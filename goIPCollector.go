@@ -301,9 +301,6 @@ func DoConsume(dataRecord, dbFile, urlBase string, log *logger.Logger) {
 		if !ok {
 			rc, targetRecord = TryQuery(urlBase, rangeStartIP, log)
 			if targetRecord == nil {
-				if rc != 104 {
-					rangeStartIP += 1
-				}
 				continue
 			}
 		}
@@ -318,7 +315,7 @@ func DoConsume(dataRecord, dbFile, urlBase string, log *logger.Logger) {
 			if !ok {
 				_, midRecord = TryQuery(urlBase, mid, log)
 				if midRecord == nil {
-					break
+					continue
 				}
 			}
 
